@@ -1,5 +1,5 @@
 use egui::{Color32, CornerRadius, FontId, Margin, RichText, Stroke, StrokeKind, Vec2};
-use crate::app::{App, LastOp, View};
+use crate::app::{App, BgViewMode, LastOp, View};
 use crate::ui::theme::{JADE, NAV_ACTIVE, OBSIDIAN_0, OBSIDIAN_1, OBSIDIAN_2, TEXT};
 use crate::ui::widgets::button::{jade_button, normal_button};
 use crate::ui::widgets::image_pane::image_pane;
@@ -305,7 +305,7 @@ pub fn show(ctx: &egui::Context, app: &mut App) {
             ui.add_space(2.0);
             nav_item(ui, app, View::Library, "LIBRARY");
             ui.add_space(2.0);
-            nav_item(ui, app, View::History, "HISTORY");
+            nav_item(ui, app, View::History, "BG SUBTRACT");
             ui.add_space(2.0);
             nav_item(ui, app, View::Layers, "LAYERS");
             ui.add_space(2.0);
@@ -426,31 +426,167 @@ pub fn show(ctx: &egui::Context, app: &mut App) {
     egui::CentralPanel::default()
         .frame(frame_central)
         .show(ctx, |ui| {
-            let avail = ui.available_size();
-            let gap = 8.0;
-            let pane_size = Vec2::new((avail.x - gap) / 2.0, avail.y);
+            if app.current_view == View::History {
+                bg_subtract_central(ui, app);
+            } else {
+                let avail = ui.available_size();
+                let gap = 8.0;
+                let pane_size = Vec2::new((avail.x - gap) / 2.0, avail.y);
 
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::ZERO;
-                image_pane(
-                    ui,
-                    pane_size,
-                    "Original Image",
-                    app.original_image.as_ref(),
-                    &mut app.original_zoom,
-                    &mut app.original_pan,
-                );
-                ui.add_space(gap);
-                image_pane(
-                    ui,
-                    pane_size,
-                    "Processed Image",
-                    app.processed_image.as_ref(),
-                    &mut app.processed_zoom,
-                    &mut app.processed_pan,
-                );
-            });
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::ZERO;
+                    image_pane(
+                        ui,
+                        pane_size,
+                        "Original Image",
+                        app.original_image.as_ref(),
+                        &mut app.original_zoom,
+                        &mut app.original_pan,
+                    );
+                    ui.add_space(gap);
+                    image_pane(
+                        ui,
+                        pane_size,
+                        "Processed Image",
+                        app.processed_image.as_ref(),
+                        &mut app.processed_zoom,
+                        &mut app.processed_pan,
+                    );
+                });
+            }
         });
+}
+
+fn bg_subtract_central(ui: &mut egui::Ui, app: &mut App) {
+    if let Some(rx) = app.bg_frame_rx.as_ref() {
+        let mut latest: Option<image::DynamicImage> = None;
+        while let Ok(frame) = rx.try_recv() {
+            latest = Some(frame);
+        }
+        if let Some(frame) = latest {
+            let gray = frame.to_luma8();
+            let rgb = frame.to_rgb8();
+            if app.bg_model.is_none() {
+                let mut model =
+                    crate::core::gaussian_background::GaussianBackgroundModel::new(
+                        gray.width(),
+                        gray.height(),
+                        0.01,
+                        2.5,
+                    );
+                for (i, p) in gray.pixels().enumerate() {
+                    model.mean[i] = p[0] as f32;
+                    model.variance[i] = 200.0;
+                }
+                app.bg_model = Some(model);
+                app.bg_clean_frame = Some(rgb.clone());
+            }
+            let raw_mask = app.bg_model.as_mut().unwrap().process_frame(&gray);
+            let eroded = crate::core::erotion::apply_erosion(&raw_mask, 3);
+            let cleaned = crate::core::dilatation::apply_dilatation(&eroded, 3);
+            app.bg_camera_image = Some(crate::ui::image_loader::dynamic_to_texture(
+                ui.ctx(),
+                &frame,
+                "bg_cam",
+            ));
+
+            let right_pane_dyn = match (app.bg_view_mode, app.bg_clean_frame.as_ref()) {
+                (BgViewMode::Predator, Some(bg_clean)) => {
+                    let composite = crate::ui::effects::predator_composite(
+                        &rgb, bg_clean, &cleaned, 15, 15,
+                    );
+                    image::DynamicImage::ImageRgb8(composite)
+                }
+                _ => image::DynamicImage::ImageLuma8(cleaned),
+            };
+            app.bg_mask_image = Some(crate::ui::image_loader::dynamic_to_texture(
+                ui.ctx(),
+                &right_pane_dyn,
+                "bg_right",
+            ));
+        }
+    }
+
+    if app.bg_session.is_some() {
+        ui.ctx().request_repaint();
+    }
+
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        let running = app.bg_session.is_some();
+        let btn = if running {
+            normal_button(ui, "Stop Camera")
+        } else {
+            jade_button(ui, "Start Camera")
+        };
+        if btn.clicked() {
+            if running {
+                if let Some(mut s) = app.bg_session.take() {
+                    s.stop();
+                }
+                app.bg_frame_rx = None;
+                app.bg_model = None;
+                app.bg_clean_frame = None;
+            } else {
+                let (tx, rx) = std::sync::mpsc::channel();
+                if let Some(session) = crate::ui::camera_worker::start_camera(tx) {
+                    app.bg_session = Some(session);
+                    app.bg_frame_rx = Some(rx);
+                    app.bg_camera_image = None;
+                    app.bg_mask_image = None;
+                    app.bg_model = None;
+                    app.bg_clean_frame = None;
+                }
+            }
+        }
+        if running {
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new("● Camera running")
+                    .color(JADE)
+                    .size(11.0),
+            );
+        }
+        ui.add_space(20.0);
+        ui.label(RichText::new("Mode:").size(11.0).color(TEXT));
+        ui.selectable_value(&mut app.bg_view_mode, BgViewMode::Mask, "Mask");
+        ui.selectable_value(&mut app.bg_view_mode, BgViewMode::Predator, "Predator");
+    });
+    ui.add_space(8.0);
+
+    let avail = ui.available_size();
+    let gap = 8.0;
+    let pane_size = Vec2::new((avail.x - gap) / 2.0, avail.y);
+
+    let mut zoom_left = 1.0_f32;
+    let mut pan_left = Vec2::ZERO;
+    let mut zoom_right = 1.0_f32;
+    let mut pan_right = Vec2::ZERO;
+
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::ZERO;
+        image_pane(
+            ui,
+            pane_size,
+            "Camera",
+            app.bg_camera_image.as_ref(),
+            &mut zoom_left,
+            &mut pan_left,
+        );
+        ui.add_space(gap);
+        let right_label = match app.bg_view_mode {
+            BgViewMode::Mask => "Foreground Mask",
+            BgViewMode::Predator => "Predator",
+        };
+        image_pane(
+            ui,
+            pane_size,
+            right_label,
+            app.bg_mask_image.as_ref(),
+            &mut zoom_right,
+            &mut pan_right,
+        );
+    });
 }
 
 fn build_export_image(app: &App) -> Option<image::DynamicImage> {

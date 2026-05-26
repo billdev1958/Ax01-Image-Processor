@@ -19,6 +19,12 @@ pub enum LastOp {
     HsvSegmentation,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum BgViewMode {
+    Mask,
+    Predator,
+}
+
 pub struct App {
     pub current_view: View,
     pub tools_expanded: bool,
@@ -39,6 +45,13 @@ pub struct App {
     pub hsv_target_hue: f32,
     pub hsv_tolerance: f32,
     pub last_op: Option<LastOp>,
+    pub bg_session: Option<crate::ui::camera_worker::CameraSession>,
+    pub bg_frame_rx: Option<std::sync::mpsc::Receiver<image::DynamicImage>>,
+    pub bg_model: Option<crate::core::gaussian_background::GaussianBackgroundModel>,
+    pub bg_camera_image: Option<egui::TextureHandle>,
+    pub bg_mask_image: Option<egui::TextureHandle>,
+    pub bg_clean_frame: Option<image::RgbImage>,
+    pub bg_view_mode: BgViewMode,
 }
 
 impl App {
@@ -64,6 +77,13 @@ impl App {
             hsv_target_hue: 0.0,
             hsv_tolerance: 15.0,
             last_op: None,
+            bg_session: None,
+            bg_frame_rx: None,
+            bg_model: None,
+            bg_camera_image: None,
+            bg_mask_image: None,
+            bg_clean_frame: None,
+            bg_view_mode: BgViewMode::Mask,
         }
     }
 }
