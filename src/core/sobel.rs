@@ -28,7 +28,6 @@ pub fn sobel(input: &GrayImage) -> GrayImage {
                 }
             }
 
-            // (Pythagorean theorem)
             let magnitude = (gx * gx + gy * gy).sqrt();
 
             let clamped_val = magnitude.clamp(0.0, 255.0) as u8;

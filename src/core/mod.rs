@@ -1,4 +1,3 @@
-// reserved module — image processing logic
 pub mod dilatation;
 pub mod erotion;
 pub mod gaussian_background;

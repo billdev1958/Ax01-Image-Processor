@@ -67,8 +67,6 @@ pub fn show(ctx: &egui::Context, app: &mut App) {
                 if sub_nav_item(ui, "Dilation").clicked() {
                     apply_op(app, ui.ctx(), LastOp::Dilation);
                 }
-                let _ = sub_nav_item(ui, "Opening");
-                let _ = sub_nav_item(ui, "Closing");
                 ui.add_space(4.0);
                 if sub_nav_item(ui, "Sobel").clicked() {
                     apply_op(app, ui.ctx(), LastOp::Sobel);
@@ -303,13 +301,7 @@ pub fn show(ctx: &egui::Context, app: &mut App) {
                 ui.add_space(1.0);
             }
             ui.add_space(2.0);
-            nav_item(ui, app, View::Library, "LIBRARY");
-            ui.add_space(2.0);
             nav_item(ui, app, View::History, "BG SUBTRACT");
-            ui.add_space(2.0);
-            nav_item(ui, app, View::Layers, "LAYERS");
-            ui.add_space(2.0);
-            nav_item(ui, app, View::Export, "EXPORT");
 
                 });
 
@@ -466,13 +458,13 @@ fn bg_subtract_central(ui: &mut egui::Ui, app: &mut App) {
         if let Some(frame) = latest {
             let gray = frame.to_luma8();
             let rgb = frame.to_rgb8();
+            let (w, h) = gray.dimensions();
+            let total = (w * h) as usize;
+
             if app.bg_model.is_none() {
                 let mut model =
                     crate::core::gaussian_background::GaussianBackgroundModel::new(
-                        gray.width(),
-                        gray.height(),
-                        0.01,
-                        2.5,
+                        w, h, 0.01, 2.5,
                     );
                 for (i, p) in gray.pixels().enumerate() {
                     model.mean[i] = p[0] as f32;
@@ -480,25 +472,82 @@ fn bg_subtract_central(ui: &mut egui::Ui, app: &mut App) {
                 }
                 app.bg_model = Some(model);
                 app.bg_clean_frame = Some(rgb.clone());
+                app.motion_history = Some(vec![0.0; total]);
             }
+
             let raw_mask = app.bg_model.as_mut().unwrap().process_frame(&gray);
             let eroded = crate::core::erotion::apply_erosion(&raw_mask, 3);
-            let cleaned = crate::core::dilatation::apply_dilatation(&eroded, 3);
+            let opened = crate::core::dilatation::apply_dilatation(&eroded, 3);
+            let dilated_more = crate::core::dilatation::apply_dilatation(&opened, 5);
+            let cleaned = crate::core::erotion::apply_erosion(&dilated_more, 5);
+
             app.bg_camera_image = Some(crate::ui::image_loader::dynamic_to_texture(
                 ui.ctx(),
                 &frame,
                 "bg_cam",
             ));
 
-            let right_pane_dyn = match (app.bg_view_mode, app.bg_clean_frame.as_ref()) {
-                (BgViewMode::Predator, Some(bg_clean)) => {
+            let bg_clean = app.bg_clean_frame.as_ref().unwrap();
+            let history = app.motion_history.as_mut().unwrap();
+
+            let mut classification = vec![0u8; total];
+            for y in 0..h {
+                for x in 0..w {
+                    let i = (y * w + x) as usize;
+                    if cleaned.get_pixel(x, y)[0] > 127 {
+                        let curr = rgb.get_pixel(x, y);
+                        let ref_pix = bg_clean.get_pixel(x, y);
+                        classification[i] = if crate::ui::effects::is_shadow(curr, ref_pix) {
+                            2
+                        } else {
+                            1
+                        };
+                    }
+                }
+            }
+
+            for v in history.iter_mut() {
+                *v = (*v - 5.0).max(0.0);
+            }
+            for i in 0..total {
+                if classification[i] == 1 {
+                    history[i] = 255.0;
+                }
+            }
+
+            let right_pane_dyn = match app.bg_view_mode {
+                BgViewMode::Mask => {
+                    let mut output = image::GrayImage::new(w, h);
+                    for y in 0..h {
+                        for x in 0..w {
+                            let i = (y * w + x) as usize;
+                            let val = match classification[i] {
+                                1 => 255,
+                                2 => 128,
+                                _ => history[i] as u8,
+                            };
+                            output.put_pixel(x, y, image::Luma([val]));
+                        }
+                    }
+                    image::DynamicImage::ImageLuma8(output)
+                }
+                BgViewMode::Predator => {
+                    let mut real_fg = image::GrayImage::new(w, h);
+                    for y in 0..h {
+                        for x in 0..w {
+                            let i = (y * w + x) as usize;
+                            if classification[i] == 1 {
+                                real_fg.put_pixel(x, y, image::Luma([255]));
+                            }
+                        }
+                    }
                     let composite = crate::ui::effects::predator_composite(
-                        &rgb, bg_clean, &cleaned, 15, 15,
+                        &rgb, bg_clean, &real_fg, 15, 15,
                     );
                     image::DynamicImage::ImageRgb8(composite)
                 }
-                _ => image::DynamicImage::ImageLuma8(cleaned),
             };
+
             app.bg_mask_image = Some(crate::ui::image_loader::dynamic_to_texture(
                 ui.ctx(),
                 &right_pane_dyn,
@@ -527,6 +576,7 @@ fn bg_subtract_central(ui: &mut egui::Ui, app: &mut App) {
                 app.bg_frame_rx = None;
                 app.bg_model = None;
                 app.bg_clean_frame = None;
+                app.motion_history = None;
             } else {
                 let (tx, rx) = std::sync::mpsc::channel();
                 if let Some(session) = crate::ui::camera_worker::start_camera(tx) {
@@ -536,6 +586,7 @@ fn bg_subtract_central(ui: &mut egui::Ui, app: &mut App) {
                     app.bg_mask_image = None;
                     app.bg_model = None;
                     app.bg_clean_frame = None;
+                    app.motion_history = None;
                 }
             }
         }

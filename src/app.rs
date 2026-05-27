@@ -2,12 +2,9 @@ use crate::ui::screens::showcase;
 
 #[derive(Default, PartialEq, Clone, Copy)]
 pub enum View {
-    Tools,
     #[default]
-    Library,
+    Tools,
     History,
-    Layers,
-    Export,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -51,6 +48,7 @@ pub struct App {
     pub bg_camera_image: Option<egui::TextureHandle>,
     pub bg_mask_image: Option<egui::TextureHandle>,
     pub bg_clean_frame: Option<image::RgbImage>,
+    pub motion_history: Option<Vec<f32>>,
     pub bg_view_mode: BgViewMode,
 }
 
@@ -83,6 +81,7 @@ impl App {
             bg_camera_image: None,
             bg_mask_image: None,
             bg_clean_frame: None,
+            motion_history: None,
             bg_view_mode: BgViewMode::Mask,
         }
     }
